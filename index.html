@@ -29,40 +29,34 @@ function rect(x,y,w,h,color){ctx.fillStyle=color;ctx.fillRect(Math.round(x),Math
 function ellipse(x,y,rx,ry,color){ctx.fillStyle=color;ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fill()}
 function line(x,y,x2,y2,color,width=1){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke()}
 function drawBackground(){
- const sky=ctx.createLinearGradient(0,0,0,H);sky.addColorStop(0,'#24576a');sky.addColorStop(.43,'#40734b');sky.addColorStop(1,'#14291e');ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
- // distant jungle silhouettes
- for(let i=0;i<13;i++){let x=i*82-18,h=100+(i*47%93);rect(x,95,3,360,'#183a32');ellipse(x+14,112,45,h*.42,'#19483b');ellipse(x+39,154,43,h*.38,'#20523f');ellipse(x-18,186,38,h*.34,'#1b4939');}
- // misty mountain and waterfall
- ctx.fillStyle='#79958a';ctx.beginPath();ctx.moveTo(275,197);ctx.lineTo(407,86);ctx.lineTo(534,201);ctx.closePath();ctx.fill();ctx.fillStyle='#a8b79a';ctx.beginPath();ctx.moveTo(365,123);ctx.lineTo(407,86);ctx.lineTo(455,137);ctx.closePath();ctx.fill();
- rect(277,202,24,150,'#90b9ac');rect(280,205,8,141,'#d7e7c7');rect(294,221,6,104,'#c3dbbd');
- // temple silhouette and stepped stonework
- rect(344,220,272,245,'#182a25');rect(370,185,220,40,'#26392a');rect(393,150,174,41,'#30452d');rect(419,125,123,30,'#384b2e');
- for(let row=0;row<9;row++){let y=229+row*26,x=352-(row%2)*8;for(let col=0;col<7;col++){let bx=x+col*42;rect(bx,y,39,23,(row+col)%3===0?'#596044':(row+col)%3===1?'#716b48':'#4a533b');rect(bx+2,y+2,34,2,'#a69a62');rect(bx+4,y+7,3,2,'#343b2d');if((row*7+col)%4===0){rect(bx+26,y+12,10,3,'#7e764e');}}}
- // upper crown blocks
- for(let i=0;i<6;i++){rect(384+i*32,177,29,10,'#827751');rect(402+i*26,145,23,8,'#85815a');}
- // moss strips and hanging vines
- for(let i=0;i<18;i++){let x=354+i*15,y=228+(i%4)*4;rect(x,y,7,5,'#477b42');if(i%3===0){for(let j=0;j<4+(i%4);j++)rect(x+2,y+5+j*8,3,7,j%2?'#335b32':'#497a3e')}}
- // skull doorway
- rect(412,337,136,128,'#101b18');rect(428,327,104,18,'#d0bc7a');rect(434,345,94,90,'#080e0d');ellipse(480,347,48,42,'#c0ad72');ellipse(461,346,12,14,'#101512');ellipse(499,346,12,14,'#101512');ctx.beginPath();ctx.moveTo(473,371);ctx.lineTo(487,371);ctx.lineTo(480,380);ctx.closePath();ctx.fillStyle='#101512';ctx.fill();rect(447,386,66,27,'#d2be80');for(let i=0;i<5;i++)rect(450+i*13,389,5,18,'#514a36');
- // doorway depth
- rect(452,410,56,55,'#070c0b');rect(461,411,37,54,'#101d17');
- // stone stairs
- for(let i=0;i<5;i++){let y=444+i*9,x=426-i*12,w=108+i*24;rect(x,y,w,8,'#766e49');rect(x+3,y,w-6,2,'#b1a26a');}
- // carved side pillars
- for(let x of [303,637]){rect(x,344,20,112,'#665f43');rect(x-7,337,34,11,'#a18d5b');rect(x-4,453,29,10,'#877750');for(let y=362;y<440;y+=30){rect(x+4,y,12,13,'#343c30');rect(x+7,y+3,6,7,'#b09b62')} }
- // palms and broad leaves
- for(let side of [0,1]){let x=side?905:55;ctx.strokeStyle='#362f22';ctx.lineWidth=9;ctx.beginPath();ctx.moveTo(x,460);ctx.quadraticCurveTo(x+(side?-28:30),300,x+(side?-68:63),207);ctx.stroke();for(let k=0;k<6;k++){let dx=(k-2.5)*25;ctx.strokeStyle=k%2?'#347544':'#4f873b';ctx.lineWidth=7;ctx.beginPath();ctx.moveTo(x+(side?-68:63),207);ctx.quadraticCurveTo(x+dx+(side?-75:75),195-k*5,x+dx*1.8+(side?-95:95),225+k*4);ctx.stroke();}}
- // temple floor
- rect(0,463,W,145,'#283727');for(let y=470;y<608;y+=29){line(0,y,W,y,'#48513a',2);for(let x=(y%2)*33;x<W;x+=72)line(x,y,x-18,y+29,'#414b37',1)}
- // ferns
- for(let i=0;i<18;i++){let x=(i*79+31)%W,y=462+(i%4)*31;for(let j=-2;j<=2;j++){line(x,y,x+j*8,y-15-Math.abs(j)*3,j%2?'#477a3c':'#578742',3);}}
- // fire bowls
- for(let x of [244,716]){rect(x-18,402,36,18,'#66543b');rect(x-24,414,48,9,'#807047');rect(x-14,424,28,39,'#585139');rect(x-22,459,44,8,'#81734b');ellipse(x,397,13,7,'#e67d35');ellipse(x,390,8,13,'#ffb94d');ellipse(x-2,386,4,8,'#fff0a0');}
- // gentle screen vignette
- const vg=ctx.createRadialGradient(480,300,180,480,300,560);vg.addColorStop(0,'transparent');vg.addColorStop(1,'#07100dbb');ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+ // Enclosed temple chamber based on the user's screenshots.
+ rect(0,0,W,H,'#101b25');
+ const wall=ctx.createLinearGradient(0,80,0,470);wall.addColorStop(0,'#182b37');wall.addColorStop(.55,'#27343a');wall.addColorStop(1,'#344032');ctx.fillStyle=wall;ctx.fillRect(0,85,W,385);
+ // Masonry courses with irregular seams.
+ for(let row=0;row<11;row++){let y=94+row*33;for(let col=-1;col<18;col++){let x=col*63+(row%2)*31;let shade=(row*7+col*3)%5;let colors=['#344044','#3b4541','#41463d','#303b3e','#4a493b'];rect(x+2,y+2,59,29,colors[(shade+5)%5]);rect(x+5,y+4,53,2,'#66706155');if((row+col)%4===0){rect(x+12,y+17,19,3,'#252f31');rect(x+41,y+22,11,2,'#666247');}if((row*3+col)%7===0)rect(x+8,y+8,4,5,'#527044');}}
+ // Dark arch recess and carved lintel.
+ rect(0,82,W,18,'#111d26');rect(0,99,102,335,'#182831');rect(858,99,102,335,'#182831');
+ for(let x=0;x<W;x+=96){rect(x,91,74,13,'#4a493b');rect(x+3,93,67,3,'#797052');rect(x+18,106,6,24,'#202e31');}
+ rect(312,119,336,225,'#172a31');rect(337,130,286,214,'#263c3b');rect(357,143,246,200,'#17292d');rect(375,157,210,186,'#0e1a21');
+ for(let i=0;i<8;i++){let yy=165+i*19;let inset=Math.floor(i*6);rect(349+inset,yy,262-inset*2,16,i%2?'#62634a':'#777052');rect(354+inset,yy+2,252-inset*2,2,'#999067');}
+ // Emerald idol on a tiered altar.
+ rect(382,339,196,15,'#85754d');rect(398,354,164,20,'#56583d');rect(414,374,132,34,'#6d6746');rect(430,407,100,28,'#4b4b38');
+ rect(447,273,66,68,'#28644c');rect(439,256,82,28,'#3f8060');rect(444,247,72,14,'#64906a');rect(453,236,54,18,'#39785d');rect(434,245,92,18,'#6c875a');rect(441,251,78,8,'#9d9c60');rect(450,267,60,44,'#42795a');rect(457,273,12,11,'#111f22');rect(491,273,12,11,'#111f22');rect(459,275,7,5,'#e9a34c');rect(493,275,7,5,'#e9a34c');rect(476,285,8,10,'#24473d');rect(461,300,38,5,'#1c382f');rect(468,312,24,5,'#91a46a');
+ for(let x of [367,580]){rect(x,214,27,102,'#4b5944');rect(x+4,219,19,7,'#899069');rect(x+6,236,15,50,'#273b36');rect(x+9,243,9,22,'#71805a');rect(x+8,274,11,6,'#b47843');}
+ // Relief columns and torch sconces.
+ for(let x of [104,241,719,856]){rect(x-17,176,34,251,'#5a5946');rect(x-23,166,46,15,'#a18b58');rect(x-18,184,36,8,'#7a7250');rect(x-12,198,24,204,'#444b40');for(let y=213;y<390;y+=42){rect(x-8,y,16,18,'#62674b');rect(x-5,y+4,10,3,'#a0905c');}rect(x-24,420,48,13,'#8b7950');rect(x-31,433,62,14,'#544e3c');}
+ for(let x of [62,293,667,898]){rect(x-10,237,20,9,'#98764b');rect(x-5,246,10,24,'#72573a');rect(x-16,270,32,8,'#49453a');rect(x-7,218,14,22,'#ec792f');rect(x-4,211,8,18,'#ffc251');rect(x-2,210,4,8,'#fff0a0');}
+ // Worn arena floor, moss, and the path up to the idol.
+ rect(0,435,W,173);rect(0,435,W,9,'#6d6546');rect(0,444,W,7,'#a08a51');
+ for(let row=0;row<6;row++){let y=454+row*26;for(let col=-1;col<13;col++){let x=col*82+(row%2)*41;let palettes=['#404b3a','#4c503b','#57513b','#39463a','#655840'];rect(x+2,y,78,23,palettes[(row*5+col*3+25)%5]);rect(x+4,y+1,73,2,'#89906955');if((row+col)%3===0){rect(x+14,y+8,18,3,'#343d34');rect(x+52,y+14,15,2,'#8c774b');}if((row*2+col)%5===0){rect(x+8,y+4,14,3,'#5e873e');rect(x+9,y+7,6,5,'#42733b');}}}
+ for(let i=0;i<4;i++){let y=444+i*12;rect(402-i*15,y,156+i*30,9,i%2?'#76704c':'#928157');rect(407-i*15,y+1,146+i*30,2,'#b19a62');}
+ // Spike pits at the edges of the playable floor.
+ for(let x of [20,172,788,940]){rect(x-47,526,94,43,'#171d20');rect(x-47,526,94,5,'#81704a');for(let i=0;i<6;i++){let sx=x-40+i*16;ctx.beginPath();ctx.moveTo(sx,526);ctx.lineTo(sx+7,508+(i%2)*5);ctx.lineTo(sx+14,526);ctx.closePath();ctx.fillStyle='#aaa17e';ctx.fill();rect(sx+6,522,3,4,'#d1c79b');}}
+ for(let i=0;i<44;i++){let x=(i*197+47)%W,y=453+((i*61)%145);if(y>520&&[20,172,788,940].some(cx=>Math.abs(x-cx)<49))continue;rect(x,y,4+(i%5)*2,3+(i%3)*2,i%2?'#756344':'#3d6340');if(i%4===0)rect(x+4,y-3,3,3,'#649048');}
+ const vg=ctx.createRadialGradient(480,316,180,480,316,590);vg.addColorStop(0,'transparent');vg.addColorStop(.72,'#08120a25');vg.addColorStop(1,'#050b0fe0');ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
 }
 function drawTorchLights(){ctx.save();ctx.globalCompositeOperation='lighter';for(const t of torches){let flick=Math.sin(frame*.09+t.phase)*3;let g=ctx.createRadialGradient(t.x,t.y,0,t.x,t.y,t.r*3);g.addColorStop(0,'#ffb64b55');g.addColorStop(1,'#fa8a1600');ctx.fillStyle=g;ctx.beginPath();ctx.arc(t.x,t.y,t.r*3,0,Math.PI*2);ctx.fill();if(t.y<465){ellipse(t.x,t.y+flick,2,4,'#ffce6488')}}ctx.restore()}
-function drawPlayer(){let x=player.x,y=player.y;if(player.inv>0&&Math.floor(frame/5)%2===0)return;ellipse(x,y+8,12,6,'#10231caa');rect(x-8,y-5,16,16,'#49664a');rect(x-7,y-14,14,13,'#bb9963');rect(x-9,y-16,18,5,'#343c2e');rect(x-5,y-10,3,3,'#171b16');rect(x+3,y-10,3,3,'#171b16');rect(x-6,y+10,5,6,'#473a2c');rect(x+2,y+10,5,6,'#473a2c');rect(x+(player.face>0?6:-10),-0+y,5,3,'#d7ad6b');if(Math.floor(frame/15)%2===0){rect(x-10,y-3,4,3,'#748a54');rect(x+7,y+2,4,3,'#748a54')}}
+function drawPlayer(){let x=player.x,y=player.y;if(player.inv>0&&Math.floor(frame/5)%2===0)return;ellipse(x,y+9,14,6,'#09130fcc');rect(x-9,y-5,18,16,'#a94f2d');rect(x-7,y-12,14,10,'#d19557');rect(x-10,y-14,20,5,'#4c3928');rect(x-7,y-18,14,6,'#765038');rect(x-5,y-10,3,3,'#201b17');rect(x+3,y-10,3,3,'#201b17');rect(x-7,y+10,5,7,'#493728');rect(x+3,y+10,5,7,'#493728');rect(x-11,y+1,5,4,'#d3a261');let wx=x+(player.face>0?7:-14);rect(wx,y-2,9,4,'#c4b486');rect(wx+(player.face>0?6:-3),y-1,4,2,'#e6d7a0');rect(wx,y+2,4,3,'#59432c');rect(x-7,y-1,3,7,'#e9bd68');if(Math.floor(frame/15)%2===0){rect(x-10,y-2,4,3,'#72934a');rect(x+7,y+3,4,3,'#72934a')}}
 function drawEnemy(e){let pulse=Math.sin(frame*.11+e.phase);ellipse(e.x,e.y+8,12,5,'#091713aa');if(e.type===0){rect(e.x-8,e.y-11,16,18,'#a78d53');rect(e.x-6,e.y-16,12,10,'#c3a969');rect(e.x-7,e.y-18,4,4,'#463b29');rect(e.x+3,e.y-18,4,4,'#463b29');rect(e.x-5,e.y-12,4,4,'#211d17');rect(e.x+2,e.y-12,4,4,'#211d17');rect(e.x-3,e.y-4,6,3,'#e96542');rect(e.x-10,e.y+6,5,7,'#59472f');rect(e.x+5,e.y+6,5,7,'#59472f');if(pulse>0)rect(e.x-2,e.y-11,2,2,'#ffc777');}else{ellipse(e.x,e.y,11,13,'#4c8271');ellipse(e.x,e.y-10,8,8,'#78a38a');rect(e.x-7,e.y-12,5,5,'#ffc86b');rect(e.x+2,e.y-12,5,5,'#ffc86b');rect(e.x-5,e.y+12,4,5,'#335648');rect(e.x+3,e.y+12,4,5,'#335648')}}
 function drawShot(s){ctx.fillStyle=s.enemy?'#ff6d45':'#ffe58a';ctx.shadowColor=s.enemy?'#ff5a35':'#ffd05d';ctx.shadowBlur=12;ellipse(s.x,s.y,s.enemy?3:4,s.enemy?3:2,s.enemy?'#ff794e':'#fff1aa');ctx.shadowBlur=0}
 function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
