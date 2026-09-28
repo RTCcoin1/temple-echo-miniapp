@@ -29,16 +29,24 @@ async def start(message: Message) -> None:
     )
 
 
-async def main() -> None:
+async def run_bot() -> None:
     if not TOKEN:
-        raise SystemExit("Укажите BOT_TOKEN в .env (создайте бота через @BotFather).")
+        return
     if not WEBAPP_URL.startswith("https://"):
-        raise SystemExit("Укажите публичный HTTPS-адрес игры в WEBAPP_URL.")
+        return
     bot = Bot(TOKEN)
     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
         text="Открыть игру", web_app=WebAppInfo(url=WEBAPP_URL)
     ))
     await dp.start_polling(bot)
+
+
+async def main() -> None:
+    if not TOKEN:
+        raise SystemExit("Укажите BOT_TOKEN в .env (создайте бота через @BotFather).")
+    if not WEBAPP_URL.startswith("https://"):
+        raise SystemExit("Укажите публичный HTTPS-адрес игры в WEBAPP_URL.")
+    await run_bot()
 
 
 if __name__ == "__main__":
