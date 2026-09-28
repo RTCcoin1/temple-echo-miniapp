@@ -1,4 +1,4 @@
-# Храм: Эхо джунглей — Telegram Mini App
+# Temple Echo: Jungle Ruins — Telegram Mini App
 
 В папке лежит готовая Telegram-совместимая игра `index.html` и бот-лаунчер на aiogram 3. Игра запускается как Web App из inline-кнопки в `/start` и из меню бота.
 

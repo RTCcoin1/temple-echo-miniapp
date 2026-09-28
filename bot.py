@@ -23,7 +23,7 @@ async def start(message: Message) -> None:
         text="🌿 Войти в храм", web_app=WebAppInfo(url=WEBAPP_URL)
     )]])
     await message.answer(
-        "🌴 *Храм: Эхо джунглей*\n\nДревние стражи пробудились. Сколько волн ты переживёшь?",
+        "🌴 *Temple Echo: Jungle Ruins*\n\nДревние стражи пробудились. Сколько волн ты переживёшь?",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
