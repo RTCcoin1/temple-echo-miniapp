@@ -1,16 +1,20 @@
 # Temple Echo: Jungle Ruins — Telegram Mini App
 
-В папке лежит готовая Telegram-совместимая игра `index.html` и бот-лаунчер на aiogram 3. Игра запускается как Web App из inline-кнопки в `/start` и из меню бота.
+Готовая Telegram-совместимая игра `index.html` и бот-лаунчер на aiogram 3. Игра запускается как Web App из inline-кнопки в `/start` и из меню бота.
+
+**Игра:** https://rtccoin1.github.io/temple-echo-miniapp/
 
 ## Публикация
 
-1. Разместите `index.html` на публичном хостинге со статическими сайтами. Telegram требует HTTPS. В `WEBAPP_URL` укажите итоговый адрес страницы.
-2. Создайте бота у [@BotFather](https://t.me/BotFather) командой `/newbot` и скопируйте выданный токен.
-3. Скопируйте `.env.example` в `.env` и заполните `BOT_TOKEN` и `WEBAPP_URL`.
-4. Установите Python 3.10 или новее, затем выполните `python -m pip install -r requirements.txt` и `python bot.py`.
+1. Страница игры уже размещена на GitHub Pages по адресу выше.
+2. Создайте бота у [@BotFather](https://t.me/BotFather) командой `/newbot`.
+3. В Railway создайте сервис из репозитория `RTCcoin1/temple-echo-miniapp`. Файл `railway.json` задаёт команду запуска `python bot.py`.
+4. В переменных Railway задайте `BOT_TOKEN` (токен от BotFather) и `WEBAPP_URL` со значением `https://rtccoin1.github.io/temple-echo-miniapp/`.
 5. Откройте бота в Telegram и отправьте `/start`.
 
-Если BotFather запросит домен для Web App, укажите домен HTTPS-хостинга. Не публикуйте `.env` и не отправляйте токен бота в чат.
+Для локального запуска скопируйте `.env.example` в `.env`, заполните `BOT_TOKEN` и `WEBAPP_URL`, затем выполните `python -m pip install -r requirements.txt` и `python bot.py`.
+
+Если BotFather запросит домен для Web App, укажите `rtccoin1.github.io`. Не публикуйте `.env` и не отправляйте токен бота в чат. Для Railway задавайте его только как секретную переменную `BOT_TOKEN`.
 
 ## Управление
 
