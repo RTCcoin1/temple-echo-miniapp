@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 import math
 import random
 import secrets
+import sqlite3
 import string
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -16,6 +21,52 @@ from pydantic import BaseModel, Field
 ROOMS: dict[str, "Room"] = {}
 CAPACITY_LABELS = {2: "ЛЁГКИЙ", 4: "СРЕДНИЙ", 6: "ХАРД"}
 WORLD_W, WORLD_H = 1280, 810
+HEROES = {
+    "scout": {"name": "Следопыт", "health": 3, "speed": 205, "fire_rate": 0.17, "revive": 1.0},
+    "guardian": {"name": "Страж", "health": 4, "speed": 172, "fire_rate": 0.23, "revive": 1.0},
+    "healer": {"name": "Хранитель", "health": 3, "speed": 185, "fire_rate": 0.22, "revive": 1.8},
+}
+SKINS = {"ember": "#a94f2d", "moss": "#4d8a54", "moon": "#758bbc", "royal": "#a77a43"}
+RELICS = {
+    "fang": {"name": "Клык титана", "description": "+1 урон выстрела"},
+    "feather": {"name": "Перо ветра", "description": "+12% скорость движения"},
+    "hourglass": {"name": "Песочные часы", "description": "+18% скорострельность"},
+    "heart": {"name": "Сердце храма", "description": "+1 здоровье и лечение"},
+    "sun": {"name": "Солнечный знак", "description": "+0,4 сек защиты после удара"},
+    "rune": {"name": "Руна помощи", "description": "+30% скорость возрождения"},
+}
+BIOMES = ["Затонувший храм", "Пепельные залы", "Лунный сад", "Зал корней"]
+DAILY_MODIFIERS = [
+    {"id": "swarm", "title": "Живой камень", "description": "Стражи быстрее, но дают больше очков."},
+    {"id": "embers", "title": "Пепельный ветер", "description": "Волны приходят чаще, выстрелы сильнее."},
+    {"id": "fragile", "title": "Хрупкая печать", "description": "Меньше здоровья, зато реликвии чаще."},
+    {"id": "guardian", "title": "Пробуждение стража", "description": "Каждый пятый зал охраняет усиленный босс."},
+]
+DB_PATH = Path(os.getenv("TEMPLE_DB_PATH", "/tmp/temple-echo.sqlite3"))
+
+
+def daily_challenge(day: str | None = None) -> dict:
+    day = day or datetime.now(timezone.utc).date().isoformat()
+    digest = hashlib.sha256(day.encode("ascii")).digest()
+    modifier = DAILY_MODIFIERS[digest[0] % len(DAILY_MODIFIERS)]
+    return {
+        "day": day,
+        "seed": int.from_bytes(digest[:4], "big"),
+        "biome": BIOMES[digest[1] % len(BIOMES)],
+        **modifier,
+    }
+
+
+def init_score_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS daily_scores (
+            day TEXT NOT NULL, player_id TEXT NOT NULL, name TEXT NOT NULL,
+            score INTEGER NOT NULL, level INTEGER NOT NULL, kills INTEGER NOT NULL,
+            updated_at TEXT NOT NULL, PRIMARY KEY(day, player_id))""")
+
+
+init_score_db()
 
 
 @dataclass
@@ -26,6 +77,19 @@ class Player:
     y: float
     connected: bool = False
     ws: WebSocket | None = None
+    hero_class: str = "scout"
+    skin: str = "ember"
+    max_health: int = 3
+    health: int = 3
+    speed: float = 205
+    fire_rate: float = 0.17
+    damage: int = 1
+    shield_bonus: float = 0
+    revive_bonus: float = 1.0
+    downed: bool = False
+    revive: bool = False
+    revive_progress: float = 0
+    relics: list[str] = field(default_factory=list)
     dx: float = 0
     dy: float = 0
     shooting: bool = False
@@ -50,6 +114,12 @@ class Room:
     shots: list[dict] = field(default_factory=list)
     next_spawn: float = 0
     task: asyncio.Task | None = None
+    upgrade_options: list[str] = field(default_factory=list)
+    pending_upgrades: set[str] = field(default_factory=set)
+    boss_spawned: bool = False
+    cache: dict | None = None
+    ticks: int = 0
+    hazard_phase: int = 0
 
     @property
     def difficulty(self) -> str:
@@ -59,15 +129,33 @@ class Room:
 class CreateRoom(BaseModel):
     capacity: Literal[2, 4, 6]
     name: str = Field(min_length=1, max_length=20)
+    hero_class: str = "scout"
+    skin: str = "ember"
 
 
 class JoinRoom(BaseModel):
     name: str = Field(min_length=1, max_length=20)
     player_id: str | None = None
+    hero_class: str = "scout"
+    skin: str = "ember"
 
 
 class RoomAction(BaseModel):
     player_id: str
+
+
+class RelicAction(BaseModel):
+    player_id: str
+    relic: str
+
+
+class DailyScore(BaseModel):
+    day: str = Field(min_length=10, max_length=10)
+    player_id: str = Field(min_length=8, max_length=80)
+    name: str = Field(min_length=1, max_length=20)
+    score: int = Field(ge=0, le=2_000_000_000)
+    level: int = Field(ge=1, le=1000)
+    kills: int = Field(ge=0, le=100_000)
 
 
 def public_player(player: Player, room: Room) -> dict:
@@ -76,6 +164,13 @@ def public_player(player: Player, room: Room) -> dict:
         "name": player.name,
         "connected": player.connected,
         "host": player.id == room.host_id,
+        "hero_class": player.hero_class,
+        "class_name": HEROES[player.hero_class]["name"],
+        "skin": player.skin,
+        "health": player.health,
+        "max_health": player.max_health,
+        "downed": player.downed,
+        "relics": player.relics,
     }
 
 
@@ -100,6 +195,11 @@ def game_payload(room: Room) -> dict:
         "score": room.score,
         "kills": room.kills,
         "lives": room.lives,
+        "biome": BIOMES[((room.level - 1) // 4) % len(BIOMES)],
+        "upgrade_options": room.upgrade_options,
+        "pending_upgrades": list(room.pending_upgrades),
+        "cache": room.cache,
+        "hazard_phase": room.hazard_phase,
         "players": [
             {
                 "id": p.id,
@@ -108,6 +208,12 @@ def game_payload(room: Room) -> dict:
                 "y": round(p.y, 1),
                 "face": p.face,
                 "connected": p.connected,
+                "hero_class": p.hero_class,
+                "skin": SKINS[p.skin],
+                "health": p.health,
+                "max_health": p.max_health,
+                "downed": p.downed,
+                "revive_progress": round(p.revive_progress, 2),
             }
             for p in room.players.values()
         ],
@@ -162,31 +268,106 @@ def room_or_404(code: str) -> Room:
     return room
 
 
-def new_player(name: str, player_id: str | None = None, index: int = 0) -> Player:
+def new_player(
+    name: str,
+    player_id: str | None = None,
+    index: int = 0,
+    hero_class: str = "scout",
+    skin: str = "ember",
+) -> Player:
+    hero_class = hero_class if hero_class in HEROES else "scout"
+    skin = skin if skin in SKINS else "ember"
+    hero = HEROES[hero_class]
     return Player(
         id=player_id or secrets.token_urlsafe(12),
         name=name.strip()[:20],
         x=500 + (index % 3) * 140,
         y=520 + (index // 3) * 75,
+        hero_class=hero_class,
+        skin=skin,
+        max_health=hero["health"],
+        health=hero["health"],
+        speed=hero["speed"],
+        fire_rate=hero["fire_rate"],
+        revive_bonus=hero["revive"],
     )
+
+
+def spawn_boss(room: Room) -> None:
+    if room.boss_spawned:
+        return
+    room.boss_spawned = True
+    hp = 18 + room.capacity * 4 + room.level * 2
+    room.enemies.append({
+        "id": secrets.token_hex(4), "x": WORLD_W / 2, "y": 190, "r": 30,
+        "speed": 34 + room.level * 2, "hp": hp, "maxHp": hp,
+        "type": 1, "shot": time.monotonic() + 1.5, "phase": 0, "boss": True,
+    })
+
+
+def update_team_lives(room: Room) -> None:
+    room.lives = sum(max(0, player.health) for player in room.players.values())
+
+
+def harm_player(room: Room, player: Player, now: float) -> None:
+    if player.downed or now < player.invincible_until:
+        return
+    player.health = max(0, player.health - 1)
+    player.invincible_until = now + 1.0 + player.shield_bonus
+    if player.health == 0:
+        player.downed = True
+        player.dx = player.dy = 0
+        player.shooting = False
+    update_team_lives(room)
+
+
+def apply_relic(player: Player, relic: str) -> None:
+    if relic == "fang":
+        player.damage += 1
+    elif relic == "feather":
+        player.speed *= 1.12
+    elif relic == "hourglass":
+        player.fire_rate = max(0.08, player.fire_rate * 0.82)
+    elif relic == "heart":
+        player.max_health = min(8, player.max_health + 1)
+        player.health = min(player.max_health, player.health + 1)
+        player.downed = False
+    elif relic == "sun":
+        player.shield_bonus = min(1.5, player.shield_bonus + 0.4)
+    elif relic == "rune":
+        player.revive_bonus = min(3.0, player.revive_bonus + 0.3)
+    player.relics.append(relic)
 
 
 async def game_loop(room: Room) -> None:
     last = time.monotonic()
     last_broadcast = 0.0
-    while room.status == "playing":
+    while room.status in {"playing", "upgrade"}:
+        room.ticks += 1
         now = time.monotonic()
         dt = min(0.1, max(0.01, now - last))
         last = now
-        active = [p for p in room.players.values() if p.connected]
+        connected = [p for p in room.players.values() if p.connected]
+        active = [p for p in connected if not p.downed]
+        if room.status == "upgrade":
+            if now - last_broadcast >= 0.08:
+                await send_state(room)
+                last_broadcast = now
+            await asyncio.sleep(0.05)
+            continue
         if not active:
+            if connected and all(p.downed for p in connected):
+                room.status = "finished"
+                room.lives = 0
+                await send_state(room)
+                break
             await asyncio.sleep(0.1)
             continue
 
         for player in active:
             mag = math.hypot(player.dx, player.dy) or 1
-            player.x = max(25, min(WORLD_W - 25, player.x + player.dx / mag * 190 * dt))
-            player.y = max(190, min(WORLD_H - 25, player.y + player.dy / mag * 190 * dt))
+            player.x = max(25, min(WORLD_W - 25, player.x + player.dx / mag * player.speed * dt))
+            player.y = max(190, min(WORLD_H - 25, player.y + player.dy / mag * player.speed * dt))
             if player.dx:
                 player.face = 1 if player.dx > 0 else -1
             if player.shooting and now >= player.next_shot:
@@ -195,12 +376,16 @@ async def game_loop(room: Room) -> None:
                 if target:
                     length = math.hypot(target["x"] - player.x, target["y"] - player.y) or 1
                     dx, dy = (target["x"] - player.x) / length, (target["y"] - player.y) / length
-                room.shots.append({"id": secrets.token_hex(4), "x": player.x, "y": player.y, "vx": dx * 440, "vy": dy * 440, "enemy": False, "life": 1.6})
-                player.next_shot = now + 0.22
+                room.shots.append({"id": secrets.token_hex(4), "x": player.x, "y": player.y, "vx": dx * 440, "vy": dy * 440, "enemy": False, "life": 1.6, "damage": player.damage})
+                player.next_shot = now + player.fire_rate
+
+        if room.level % 5 == 0 and not room.boss_spawned:
+            spawn_boss(room)
 
         spawn_interval = max(0.38, 1.5 - room.capacity * 0.105 - room.level * 0.035)
         enemy_limit = room.capacity * (2 + min(room.level // 3, 3))
-        if now >= room.next_spawn and len(room.enemies) < enemy_limit:
+        boss_alive = any(enemy.get("boss") for enemy in room.enemies)
+        if not boss_alive and now >= room.next_spawn and len(room.enemies) < enemy_limit:
             side = random.randrange(4)
             x = -12 if side == 0 else WORLD_W + 12 if side == 1 else random.uniform(40, WORLD_W - 40)
             y = 120 if side == 2 else WORLD_H + 12 if side == 3 else random.uniform(145, WORLD_H - 55)
@@ -211,6 +396,7 @@ async def game_loop(room: Room) -> None:
                 "type": random.randrange(2), "shot": now + random.uniform(2.4, 4.5),
                 "phase": random.random() * 6.28,
             })
+            room.enemies[-1]["maxHp"] = room.enemies[-1]["hp"]
             room.next_spawn = now + spawn_interval
 
         for enemy in list(room.enemies):
@@ -219,11 +405,41 @@ async def game_loop(room: Room) -> None:
             enemy["x"] += (target.x - enemy["x"]) / distance * enemy["speed"] * dt
             enemy["y"] += (target.y - enemy["y"]) / distance * enemy["speed"] * dt
             if now >= enemy["shot"] and distance < 390:
-                enemy["shot"] = now + max(1.2, 3.1 - room.level * 0.08)
-                room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (target.x - enemy["x"]) / distance * 160, "vy": (target.y - enemy["y"]) / distance * 160, "enemy": True, "life": 3.0})
-            if distance < 24 and now >= target.invincible_until:
-                room.lives -= 1
-                target.invincible_until = now + 1.0
+                enemy["shot"] = now + (1.35 if enemy.get("boss") else max(1.2, 3.1 - room.level * 0.08))
+                if enemy.get("boss"):
+                    for spread in (-0.16, 0, 0.16):
+                        vx = (target.x - enemy["x"]) / distance
+                        vy = (target.y - enemy["y"]) / distance
+                        cs, sn = math.cos(spread), math.sin(spread)
+                        room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (vx * cs - vy * sn) * 175, "vy": (vx * sn + vy * cs) * 175, "enemy": True, "life": 3.0})
+                else:
+                    room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (target.x - enemy["x"]) / distance * 160, "vy": (target.y - enemy["y"]) / distance * 160, "enemy": True, "life": 3.0})
+            if distance < enemy["r"] + 12:
+                harm_player(room, target, now)
+
+        active = [p for p in connected if p.connected and not p.downed]
+        for player in active:
+            if player.revive:
+                target = min((p for p in connected if p.downed and p.id != player.id), key=lambda p: math.hypot(p.x - player.x, p.y - player.y), default=None)
+                if target and math.hypot(target.x - player.x, target.y - player.y) < 58:
+                    target.revive_progress += dt * player.revive_bonus
+                    if target.revive_progress >= 2.2:
+                        target.downed = False
+                        target.health = max(1, math.ceil(target.max_health / 2))
+                        target.revive_progress = 0
+                        target.invincible_until = now + 1.5
+                        room.score += 150
+                else:
+                    for downed in connected:
+                        downed.revive_progress = max(0, downed.revive_progress - dt * 0.4)
+
+        active = [p for p in connected if p.connected and not p.downed]
+
+        room.hazard_phase = room.ticks % 220
+        if room.level >= 3 and 193 < room.hazard_phase < 204:
+            for target in active:
+                if 610 < target.y < 637 and 110 < target.x < WORLD_W - 110:
+                    harm_player(room, target, now)
 
         for shot in list(room.shots):
             shot["x"] += shot["vx"] * dt
@@ -232,26 +448,43 @@ async def game_loop(room: Room) -> None:
             if shot["enemy"]:
                 for target in active:
                     if math.hypot(shot["x"] - target.x, shot["y"] - target.y) < 15 and now >= target.invincible_until:
-                        room.lives -= 1
-                        target.invincible_until = now + 1.0
+                        harm_player(room, target, now)
                         shot["life"] = 0
                         break
             else:
                 for enemy in list(room.enemies):
                     if math.hypot(shot["x"] - enemy["x"], shot["y"] - enemy["y"]) < enemy["r"] + 4:
-                        enemy["hp"] -= 1
+                        enemy["hp"] -= shot.get("damage", 1)
                         shot["life"] = 0
                         if enemy["hp"] <= 0:
                             room.enemies.remove(enemy)
                             room.kills += 1
-                            room.score += 100
+                            boss = enemy.get("boss", False)
+                            room.score += 1200 if boss else 100
+                            if boss:
+                                room.cache = {"x": enemy["x"], "y": enemy["y"], "kind": "boss"}
                             if room.kills % 8 == 0:
                                 room.level += 1
+                                room.boss_spawned = False
+                                room.upgrade_options = random.sample(list(RELICS), 3)
+                                room.pending_upgrades = {p.id for p in connected}
+                                room.status = "upgrade"
                         break
         room.shots = [s for s in room.shots if s["life"] > 0 and -40 < s["x"] < WORLD_W + 40 and 70 < s["y"] < WORLD_H + 40]
 
-        if room.lives <= 0:
-            room.lives = 0
+        for player in active:
+            if room.cache and math.hypot(player.x - room.cache["x"], player.y - room.cache["y"]) < 28:
+                room.cache = None
+                room.score += 300
+                wounded = min((p for p in connected if p.health < p.max_health), key=lambda p: p.health, default=None)
+                if wounded:
+                    wounded.health += 1
+                    wounded.downed = False
+                    wounded.invincible_until = now + 1.5
+                else:
+                    player.damage += 1
+        update_team_lives(room)
+        if connected and all(p.downed for p in connected):
             room.status = "finished"
         if now - last_broadcast >= 0.08 or room.status == "finished":
             await send_state(room)
@@ -279,7 +512,7 @@ async def list_lobbies() -> dict:
 @app.post("/api/lobbies")
 async def create_lobby(request: CreateRoom) -> dict:
     code = make_code()
-    host = new_player(request.name, index=0)
+    host = new_player(request.name, index=0, hero_class=request.hero_class, skin=request.skin)
     room = Room(code=code, capacity=request.capacity, host_id=host.id)
     room.players[host.id] = host
     ROOMS[code] = room
@@ -296,7 +529,7 @@ async def join_lobby(code: str, request: JoinRoom) -> dict:
         return {"room": lobby_payload(room), "player_id": player.id}
     if len(room.players) >= room.capacity:
         raise HTTPException(status_code=409, detail="Комната заполнена")
-    player = new_player(request.name, index=len(room.players))
+    player = new_player(request.name, index=len(room.players), hero_class=request.hero_class, skin=request.skin)
     room.players[player.id] = player
     await send_room(room)
     return {"room": lobby_payload(room), "player_id": player.id}
@@ -315,13 +548,45 @@ async def start_lobby(code: str, request: RoomAction) -> dict:
     room.level = 1
     room.score = 0
     room.kills = 0
-    room.lives = {2: 4, 4: 5, 6: 6}[room.capacity]
+    room.lives = 0
+    room.boss_spawned = False
+    room.cache = None
+    room.upgrade_options.clear()
+    room.pending_upgrades.clear()
+    for player in room.players.values():
+        player.health = player.max_health
+        player.downed = False
+        player.revive_progress = 0
+        player.damage = 1
+        player.relics.clear()
+    update_team_lives(room)
     room.enemies.clear()
     room.shots.clear()
     room.next_spawn = time.monotonic() + 0.7
     room.task = asyncio.create_task(game_loop(room))
     await send_state(room)
     return {"room": lobby_payload(room)}
+
+
+@app.post("/api/lobbies/{code}/upgrade")
+async def choose_relic(code: str, request: RelicAction) -> dict:
+    room = room_or_404(code)
+    if room.status != "upgrade":
+        raise HTTPException(status_code=409, detail="Сейчас реликвию выбрать нельзя")
+    player = room.players.get(request.player_id)
+    if not player or request.player_id not in room.pending_upgrades:
+        raise HTTPException(status_code=403, detail="Игрок уже выбрал реликвию")
+    if request.relic not in room.upgrade_options or request.relic not in RELICS:
+        raise HTTPException(status_code=400, detail="Неизвестная реликвия")
+    apply_relic(player, request.relic)
+    update_team_lives(room)
+    room.pending_upgrades.discard(player.id)
+    if not room.pending_upgrades:
+        room.status = "playing"
+        room.upgrade_options.clear()
+        room.next_spawn = time.monotonic() + 0.8
+    await send_state(room)
+    return {"ok": True, "waiting": len(room.pending_upgrades)}
 
 
 @app.post("/api/lobbies/{code}/leave")
@@ -332,6 +597,8 @@ async def leave_lobby(code: str, request: RoomAction) -> dict:
         return {"ok": True}
     player.connected = False
     player.ws = None
+    room.pending_upgrades.discard(player.id)
+    update_team_lives(room)
     if player.id == room.host_id and room.players:
         room.host_id = next(iter(room.players))
     if not room.players:
@@ -340,6 +607,9 @@ async def leave_lobby(code: str, request: RoomAction) -> dict:
         if room.task and not room.task.done():
             room.task.cancel()
     else:
+        if room.status == "upgrade" and not room.pending_upgrades:
+            room.status = "playing"
+            room.upgrade_options.clear()
         await send_room(room)
     return {"ok": True}
 
@@ -365,6 +635,7 @@ async def room_socket(websocket: WebSocket) -> None:
                 player.dx = max(-1, min(1, float(message.get("dx", 0))))
                 player.dy = max(-1, min(1, float(message.get("dy", 0))))
                 player.shooting = bool(message.get("shoot", False))
+                player.revive = bool(message.get("revive", False))
             elif message.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -376,5 +647,53 @@ async def room_socket(websocket: WebSocket) -> None:
         player.ws = None
         player.dx = player.dy = 0
         player.shooting = False
+        player.revive = False
+        room.pending_upgrades.discard(player.id)
+        if room.status == "upgrade" and not room.pending_upgrades:
+            room.status = "playing"
+            room.upgrade_options.clear()
         if room.code in ROOMS:
             await send_room(room)
+
+
+def leaderboard(day: str) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT name, score, level, kills FROM daily_scores WHERE day=? ORDER BY score DESC, level DESC, kills DESC LIMIT 10",
+            (day,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/daily/challenge")
+async def get_daily_challenge() -> dict:
+    challenge = daily_challenge()
+    return {**challenge, "leaderboard": leaderboard(challenge["day"])}
+
+
+@app.get("/api/daily/leaderboard")
+async def get_daily_leaderboard(day: str | None = None) -> dict:
+    current_day = datetime.now(timezone.utc).date().isoformat()
+    day = day or current_day
+    return {"day": day, "leaderboard": leaderboard(day)}
+
+
+@app.post("/api/daily/score")
+async def submit_daily_score(request: DailyScore) -> dict:
+    current_day = datetime.now(timezone.utc).date().isoformat()
+    if request.day != current_day:
+        raise HTTPException(status_code=409, detail="Испытание дня уже сменилось")
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute(
+            """INSERT INTO daily_scores(day, player_id, name, score, level, kills, updated_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(day, player_id) DO UPDATE SET
+                 name=excluded.name,
+                 level=CASE WHEN excluded.score > daily_scores.score THEN excluded.level ELSE daily_scores.level END,
+                 kills=CASE WHEN excluded.score > daily_scores.score THEN excluded.kills ELSE daily_scores.kills END,
+                 score=MAX(daily_scores.score, excluded.score),
+                 updated_at=excluded.updated_at""",
+            (request.day, request.player_id, request.name.strip()[:20], request.score, request.level, request.kills, datetime.now(timezone.utc).isoformat()),
+        )
+    return {"day": request.day, "leaderboard": leaderboard(request.day)}
