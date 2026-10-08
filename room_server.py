@@ -96,6 +96,7 @@ class Player:
     face: int = 1
     aim_x: float = 1
     aim_y: float = 0
+    manual_aim: bool = False
     invincible_until: float = 0
     next_shot: float = 0
 
@@ -211,6 +212,7 @@ def game_payload(room: Room) -> dict:
                 "face": p.face,
                 "aimX": round(p.aim_x, 2),
                 "aimY": round(p.aim_y, 2),
+                "manualAim": p.manual_aim,
                 "connected": p.connected,
                 "hero_class": p.hero_class,
                 "skin": SKINS[p.skin],
@@ -372,7 +374,7 @@ async def game_loop(room: Room) -> None:
             mag = math.hypot(player.dx, player.dy) or 1
             player.x = max(25, min(WORLD_W - 25, player.x + player.dx / mag * player.speed * dt))
             player.y = max(190, min(WORLD_H - 25, player.y + player.dy / mag * player.speed * dt))
-            if player.dx or player.dy:
+            if (player.dx or player.dy) and not player.manual_aim:
                 aim_length = math.hypot(player.dx, player.dy) or 1
                 player.aim_x = player.dx / aim_length
                 player.aim_y = player.dy / aim_length
@@ -640,6 +642,14 @@ async def room_socket(websocket: WebSocket) -> None:
                 player.dy = max(-1, min(1, float(message.get("dy", 0))))
                 player.shooting = bool(message.get("shoot", False))
                 player.revive = bool(message.get("revive", False))
+                player.manual_aim = bool(message.get("aimManual", False))
+                if player.manual_aim:
+                    aim_x = float(message.get("aimX", player.aim_x))
+                    aim_y = float(message.get("aimY", player.aim_y))
+                    aim_length = math.hypot(aim_x, aim_y)
+                    if aim_length > 0.1:
+                        player.aim_x = aim_x / aim_length
+                        player.aim_y = aim_y / aim_length
             elif message.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -652,6 +662,7 @@ async def room_socket(websocket: WebSocket) -> None:
         player.dx = player.dy = 0
         player.shooting = False
         player.revive = False
+        player.manual_aim = False
         room.pending_upgrades.discard(player.id)
         if room.status == "upgrade" and not room.pending_upgrades:
             room.status = "playing"
