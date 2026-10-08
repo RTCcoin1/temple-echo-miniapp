@@ -94,6 +94,8 @@ class Player:
     dy: float = 0
     shooting: bool = False
     face: int = 1
+    aim_x: float = 1
+    aim_y: float = 0
     invincible_until: float = 0
     next_shot: float = 0
 
@@ -207,6 +209,8 @@ def game_payload(room: Room) -> dict:
                 "x": round(p.x, 1),
                 "y": round(p.y, 1),
                 "face": p.face,
+                "aimX": round(p.aim_x, 2),
+                "aimY": round(p.aim_y, 2),
                 "connected": p.connected,
                 "hero_class": p.hero_class,
                 "skin": SKINS[p.skin],
@@ -368,14 +372,14 @@ async def game_loop(room: Room) -> None:
             mag = math.hypot(player.dx, player.dy) or 1
             player.x = max(25, min(WORLD_W - 25, player.x + player.dx / mag * player.speed * dt))
             player.y = max(190, min(WORLD_H - 25, player.y + player.dy / mag * player.speed * dt))
-            if player.dx:
-                player.face = 1 if player.dx > 0 else -1
+            if player.dx or player.dy:
+                aim_length = math.hypot(player.dx, player.dy) or 1
+                player.aim_x = player.dx / aim_length
+                player.aim_y = player.dy / aim_length
+                if player.dx:
+                    player.face = 1 if player.dx > 0 else -1
             if player.shooting and now >= player.next_shot:
-                target = min(room.enemies, key=lambda e: math.hypot(e["x"] - player.x, e["y"] - player.y), default=None)
-                dx, dy = float(player.face), 0.0
-                if target:
-                    length = math.hypot(target["x"] - player.x, target["y"] - player.y) or 1
-                    dx, dy = (target["x"] - player.x) / length, (target["y"] - player.y) / length
+                dx, dy = player.aim_x, player.aim_y
                 room.shots.append({"id": secrets.token_hex(4), "x": player.x, "y": player.y, "vx": dx * 440, "vy": dy * 440, "enemy": False, "life": 1.6, "damage": player.damage})
                 player.next_shot = now + player.fire_rate
 
