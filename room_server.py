@@ -92,6 +92,8 @@ class Player:
     relics: list[str] = field(default_factory=list)
     dx: float = 0
     dy: float = 0
+    vx: float = 0
+    vy: float = 0
     shooting: bool = False
     face: int = 1
     aim_x: float = 1
@@ -372,8 +374,19 @@ async def game_loop(room: Room) -> None:
 
         for player in active:
             mag = math.hypot(player.dx, player.dy) or 1
-            player.x = max(25, min(WORLD_W - 25, player.x + player.dx / mag * player.speed * dt))
-            player.y = max(190, min(WORLD_H - 25, player.y + player.dy / mag * player.speed * dt))
+            response = 1 - math.exp(-14 * dt)
+            target_vx = player.dx / mag * player.speed
+            target_vy = player.dy / mag * player.speed
+            player.vx += (target_vx - player.vx) * response
+            player.vy += (target_vy - player.vy) * response
+            next_x = player.x + player.vx * dt
+            next_y = player.y + player.vy * dt
+            player.x = max(25, min(WORLD_W - 25, next_x))
+            player.y = max(190, min(WORLD_H - 25, next_y))
+            if player.x != next_x:
+                player.vx = 0
+            if player.y != next_y:
+                player.vy = 0
             if (player.dx or player.dy) and not player.manual_aim:
                 aim_length = math.hypot(player.dx, player.dy) or 1
                 player.aim_x = player.dx / aim_length
@@ -560,6 +573,9 @@ async def start_lobby(code: str, request: RoomAction) -> dict:
     room.upgrade_options.clear()
     room.pending_upgrades.clear()
     for player in room.players.values():
+        player.dx = player.dy = player.vx = player.vy = 0
+        player.manual_aim = False
+        player.shooting = False
         player.health = player.max_health
         player.downed = False
         player.revive_progress = 0
@@ -631,6 +647,7 @@ async def room_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     player.ws = websocket
     player.connected = True
+    player.vx = player.vy = 0
     await send_room(room)
     if room.status == "playing":
         await send_state(room)
@@ -660,6 +677,7 @@ async def room_socket(websocket: WebSocket) -> None:
         player.connected = False
         player.ws = None
         player.dx = player.dy = 0
+        player.vx = player.vy = 0
         player.shooting = False
         player.revive = False
         player.manual_aim = False
