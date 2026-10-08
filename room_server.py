@@ -26,7 +26,7 @@ HEROES = {
     "guardian": {"name": "Страж", "health": 4, "speed": 172, "fire_rate": 0.23, "revive": 1.0},
     "healer": {"name": "Хранитель", "health": 3, "speed": 185, "fire_rate": 0.22, "revive": 1.8},
 }
-SKINS = {"ember": "#a94f2d", "moss": "#4d8a54", "moon": "#758bbc", "royal": "#a77a43"}
+SKINS = {"ember": "#a94f2d", "moss": "#4d8a54", "moon": "#758bbc", "royal": "#a77a43", "jade": "#78b28a"}
 RELICS = {
     "fang": {"name": "Клык титана", "description": "+1 урон выстрела"},
     "feather": {"name": "Перо ветра", "description": "+12% скорость движения"},
@@ -90,6 +90,7 @@ class Player:
     revive: bool = False
     revive_progress: float = 0
     relics: list[str] = field(default_factory=list)
+    synergies: list[str] = field(default_factory=list)
     dx: float = 0
     dy: float = 0
     vx: float = 0
@@ -218,6 +219,8 @@ def game_payload(room: Room) -> dict:
                 "connected": p.connected,
                 "hero_class": p.hero_class,
                 "skin": SKINS[p.skin],
+                "relics": p.relics,
+                "synergies": p.synergies,
                 "health": p.health,
                 "max_health": p.max_health,
                 "downed": p.downed,
@@ -226,7 +229,16 @@ def game_payload(room: Room) -> dict:
             for p in room.players.values()
         ],
         "enemies": [
-            {k: round(v, 1) if isinstance(v, float) else v for k, v in e.items()}
+            {
+                **{k: round(v, 1) if isinstance(v, float) else v for k, v in e.items() if k not in {"windup_until", "lunge_until", "aim_x", "aim_y"}},
+                "windup": round(
+                    max(0.0, e.get("windup_until", 0.0) - time.monotonic())
+                    / max(0.01, e.get("windup_duration", 0.65)),
+                    2,
+                ),
+                "aimX": round(e.get("aim_x", 0.0), 2),
+                "aimY": round(e.get("aim_y", 0.0), 2),
+            }
             for e in room.enemies
         ],
         "shots": [
@@ -310,6 +322,8 @@ def spawn_boss(room: Room) -> None:
         "id": secrets.token_hex(4), "x": WORLD_W / 2, "y": 190, "r": 30,
         "speed": 34 + room.level * 2, "hp": hp, "maxHp": hp,
         "type": 1, "shot": time.monotonic() + 1.5, "phase": 0, "boss": True,
+        "windup_until": 0.0, "windup_duration": 0.72,
+        "aim_x": 0.0, "aim_y": 0.0, "lunge_until": 0.0,
     })
 
 
@@ -345,6 +359,22 @@ def apply_relic(player: Player, relic: str) -> None:
     elif relic == "rune":
         player.revive_bonus = min(3.0, player.revive_bonus + 0.3)
     player.relics.append(relic)
+    combos = (
+        ("storm", {"fang", "hourglass"}),
+        ("windguard", {"feather", "sun"}),
+        ("keeper", {"heart", "rune"}),
+    )
+    for name, parts in combos:
+        if name in player.synergies or not parts.issubset(player.relics):
+            continue
+        player.synergies.append(name)
+        if name == "windguard":
+            player.speed *= 1.08
+            player.shield_bonus = min(2.0, player.shield_bonus + 0.4)
+        elif name == "keeper":
+            player.max_health = min(8, player.max_health + 1)
+            player.health = min(player.max_health, player.health + 1)
+            player.revive_bonus = min(3.0, player.revive_bonus + 0.6)
 
 
 async def game_loop(room: Room) -> None:
@@ -395,7 +425,15 @@ async def game_loop(room: Room) -> None:
                     player.face = 1 if player.dx > 0 else -1
             if player.shooting and now >= player.next_shot:
                 dx, dy = player.aim_x, player.aim_y
-                room.shots.append({"id": secrets.token_hex(4), "x": player.x, "y": player.y, "vx": dx * 440, "vy": dy * 440, "enemy": False, "life": 1.6, "damage": player.damage})
+                spread = (-0.16, 0.0, 0.16) if "storm" in player.synergies else (0.0,)
+                for angle in spread:
+                    cs, sn = math.cos(angle), math.sin(angle)
+                    room.shots.append({
+                        "id": secrets.token_hex(4), "x": player.x, "y": player.y,
+                        "vx": (dx * cs - dy * sn) * 440,
+                        "vy": (dx * sn + dy * cs) * 440,
+                        "enemy": False, "life": 1.6, "damage": player.damage,
+                    })
                 player.next_shot = now + player.fire_rate
 
         if room.level % 5 == 0 and not room.boss_spawned:
@@ -414,6 +452,8 @@ async def game_loop(room: Room) -> None:
                 "hp": 2 if room.capacity == 6 or room.level >= 5 else 1,
                 "type": random.randrange(2), "shot": now + random.uniform(2.4, 4.5),
                 "phase": random.random() * 6.28,
+                "windup_until": 0.0, "windup_duration": 0.62,
+                "aim_x": 0.0, "aim_y": 0.0, "lunge_until": 0.0,
             })
             room.enemies[-1]["maxHp"] = room.enemies[-1]["hp"]
             room.next_spawn = now + spawn_interval
@@ -421,18 +461,46 @@ async def game_loop(room: Room) -> None:
         for enemy in list(room.enemies):
             target = min(active, key=lambda p: math.hypot(p.x - enemy["x"], p.y - enemy["y"]))
             distance = math.hypot(target.x - enemy["x"], target.y - enemy["y"]) or 1
-            enemy["x"] += (target.x - enemy["x"]) / distance * enemy["speed"] * dt
-            enemy["y"] += (target.y - enemy["y"]) / distance * enemy["speed"] * dt
-            if now >= enemy["shot"] and distance < 390:
-                enemy["shot"] = now + (1.35 if enemy.get("boss") else max(1.2, 3.1 - room.level * 0.08))
-                if enemy.get("boss"):
-                    for spread in (-0.16, 0, 0.16):
-                        vx = (target.x - enemy["x"]) / distance
-                        vy = (target.y - enemy["y"]) / distance
-                        cs, sn = math.cos(spread), math.sin(spread)
-                        room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (vx * cs - vy * sn) * 175, "vy": (vx * sn + vy * cs) * 175, "enemy": True, "life": 3.0})
+            melee = enemy.get("type") == 0 and not enemy.get("boss")
+            winding = enemy.get("windup_until", 0.0)
+            if melee:
+                if winding > now:
+                    pass
+                elif enemy.get("lunge_until", 0.0) > now:
+                    enemy["x"] += enemy.get("aim_x", 0.0) * enemy["speed"] * 3.8 * dt
+                    enemy["y"] += enemy.get("aim_y", 0.0) * enemy["speed"] * 3.8 * dt
                 else:
-                    room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (target.x - enemy["x"]) / distance * 160, "vy": (target.y - enemy["y"]) / distance * 160, "enemy": True, "life": 3.0})
+                    enemy["x"] += (target.x - enemy["x"]) / distance * enemy["speed"] * dt
+                    enemy["y"] += (target.y - enemy["y"]) / distance * enemy["speed"] * dt
+                if winding and now >= winding:
+                    enemy["windup_until"] = 0.0
+                    enemy["lunge_until"] = now + 0.22
+                elif not winding and enemy.get("lunge_until", 0.0) <= now and now >= enemy["shot"] and distance < 112:
+                    enemy["aim_x"] = (target.x - enemy["x"]) / distance
+                    enemy["aim_y"] = (target.y - enemy["y"]) / distance
+                    enemy["windup_duration"] = 0.56
+                    enemy["windup_until"] = now + enemy["windup_duration"]
+                    enemy["shot"] = now + 2.0
+            else:
+                if winding <= now:
+                    enemy["x"] += (target.x - enemy["x"]) / distance * enemy["speed"] * dt
+                    enemy["y"] += (target.y - enemy["y"]) / distance * enemy["speed"] * dt
+                if winding and now >= winding:
+                    vx, vy = enemy.get("aim_x", 0.0), enemy.get("aim_y", 0.0)
+                    if enemy.get("boss"):
+                        for spread in (-0.16, 0, 0.16):
+                            cs, sn = math.cos(spread), math.sin(spread)
+                            room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (vx * cs - vy * sn) * 175, "vy": (vx * sn + vy * cs) * 175, "enemy": True, "life": 3.0})
+                    else:
+                        room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": vx * 160, "vy": vy * 160, "enemy": True, "life": 3.0})
+                    enemy["windup_until"] = 0.0
+                elif not winding and now >= enemy["shot"] and distance < 390:
+                    enemy["aim_x"] = (target.x - enemy["x"]) / distance
+                    enemy["aim_y"] = (target.y - enemy["y"]) / distance
+                    enemy["windup_duration"] = 0.72 if enemy.get("boss") else 0.62
+                    enemy["windup_until"] = now + enemy["windup_duration"]
+                    enemy["shot"] = now + (1.7 if enemy.get("boss") else max(1.8, 3.1 - room.level * 0.08))
+            distance = math.hypot(target.x - enemy["x"], target.y - enemy["y"]) or 1
             if distance < enemy["r"] + 12:
                 harm_player(room, target, now)
 
@@ -581,6 +649,7 @@ async def start_lobby(code: str, request: RoomAction) -> dict:
         player.revive_progress = 0
         player.damage = 1
         player.relics.clear()
+        player.synergies.clear()
     update_team_lives(room)
     room.enemies.clear()
     room.shots.clear()
