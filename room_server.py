@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
+import json
 import os
 import math
 import random
@@ -14,8 +16,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qsl
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 ROOMS: dict[str, "Room"] = {}
@@ -42,7 +45,12 @@ DAILY_MODIFIERS = [
     {"id": "fragile", "title": "Хрупкая печать", "description": "Меньше здоровья, зато реликвии чаще."},
     {"id": "guardian", "title": "Пробуждение стража", "description": "Каждый пятый зал охраняет усиленный босс."},
 ]
-DB_PATH = Path(os.getenv("TEMPLE_DB_PATH", "/tmp/temple-echo.sqlite3"))
+VOLUME_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+DB_PATH = Path(os.getenv("TEMPLE_DB_PATH") or (str(Path(VOLUME_PATH) / "temple-echo.sqlite3") if VOLUME_PATH else "/tmp/temple-echo.sqlite3"))
+WEAPONS = {"bow", "sunstaff", "moonchakram"}
+PROFILE_UNLOCKS = {"first-run", "warden", "jade", "keeper"}
+PROFILE_CLASSES = {"scout", "guardian", "healer"}
+PROFILE_SKINS = {"ember", "moss", "moon", "royal", "jade"}
 
 
 def daily_challenge(day: str | None = None) -> dict:
@@ -64,6 +72,9 @@ def init_score_db() -> None:
             day TEXT NOT NULL, player_id TEXT NOT NULL, name TEXT NOT NULL,
             score INTEGER NOT NULL, level INTEGER NOT NULL, kills INTEGER NOT NULL,
             updated_at TEXT NOT NULL, PRIMARY KEY(day, player_id))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS telegram_profiles (
+            telegram_id TEXT PRIMARY KEY, profile_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""")
 
 
 init_score_db()
@@ -79,6 +90,7 @@ class Player:
     ws: WebSocket | None = None
     hero_class: str = "scout"
     skin: str = "ember"
+    weapon: str = "bow"
     max_health: int = 3
     health: int = 3
     speed: float = 205
@@ -137,6 +149,7 @@ class CreateRoom(BaseModel):
     name: str = Field(min_length=1, max_length=20)
     hero_class: str = "scout"
     skin: str = "ember"
+    weapon: str = "bow"
 
 
 class JoinRoom(BaseModel):
@@ -144,6 +157,7 @@ class JoinRoom(BaseModel):
     player_id: str | None = None
     hero_class: str = "scout"
     skin: str = "ember"
+    weapon: str = "bow"
 
 
 class RoomAction(BaseModel):
@@ -164,6 +178,10 @@ class DailyScore(BaseModel):
     kills: int = Field(ge=0, le=100_000)
 
 
+class ProfileSync(BaseModel):
+    profile: dict[str, object]
+
+
 def public_player(player: Player, room: Room) -> dict:
     return {
         "id": player.id,
@@ -173,6 +191,7 @@ def public_player(player: Player, room: Room) -> dict:
         "hero_class": player.hero_class,
         "class_name": HEROES[player.hero_class]["name"],
         "skin": player.skin,
+        "weapon": player.weapon,
         "health": player.health,
         "max_health": player.max_health,
         "downed": player.downed,
@@ -218,6 +237,7 @@ def game_payload(room: Room) -> dict:
                 "manualAim": p.manual_aim,
                 "connected": p.connected,
                 "hero_class": p.hero_class,
+                "weapon": p.weapon,
                 "skin": SKINS[p.skin],
                 "relics": p.relics,
                 "synergies": p.synergies,
@@ -294,9 +314,11 @@ def new_player(
     index: int = 0,
     hero_class: str = "scout",
     skin: str = "ember",
+    weapon: str = "bow",
 ) -> Player:
     hero_class = hero_class if hero_class in HEROES else "scout"
     skin = skin if skin in SKINS else "ember"
+    weapon = weapon if weapon in WEAPONS else "bow"
     hero = HEROES[hero_class]
     return Player(
         id=player_id or secrets.token_urlsafe(12),
@@ -305,6 +327,7 @@ def new_player(
         y=520 + (index // 3) * 75,
         hero_class=hero_class,
         skin=skin,
+        weapon=weapon,
         max_health=hero["health"],
         health=hero["health"],
         speed=hero["speed"],
@@ -318,13 +341,47 @@ def spawn_boss(room: Room) -> None:
         return
     room.boss_spawned = True
     hp = 18 + room.capacity * 4 + room.level * 2
+    boss_type = ((room.level // 5) - 1) % 6
     room.enemies.append({
         "id": secrets.token_hex(4), "x": WORLD_W / 2, "y": 190, "r": 30,
         "speed": 34 + room.level * 2, "hp": hp, "maxHp": hp,
-        "type": 1, "shot": time.monotonic() + 1.5, "phase": 0, "boss": True,
+        "type": 1, "shot": time.monotonic() + 1.5, "phase": 1, "boss": True,
+        "boss_type": boss_type, "attack_pattern": "fan", "attack_index": 0,
         "windup_until": 0.0, "windup_duration": 0.72,
         "aim_x": 0.0, "aim_y": 0.0, "lunge_until": 0.0,
     })
+
+
+BOSS_ATTACKS = (
+    ("fan", "radial", "spiral"),
+    ("cross", "sweep", "fan"),
+    ("fan", "spiral", "double"),
+    ("fan", "cross", "radial"),
+    ("sweep", "radial", "spiral"),
+    ("spiral", "cross", "sweep"),
+)
+
+
+def boss_attack_angles(enemy: dict) -> list[float]:
+    boss_type = max(0, min(5, int(enemy.get("boss_type", 0))))
+    phase = max(1, min(3, int(enemy.get("phase", 1))))
+    pattern = enemy.get("attack_pattern", BOSS_ATTACKS[boss_type][phase - 1])
+    attack_index = int(enemy.get("attack_index", 0))
+    base = math.atan2(enemy.get("aim_y", 0.0), enemy.get("aim_x", 1.0))
+    if pattern == "radial":
+        count = 8 if phase == 2 else 12
+        return [math.tau * index / count + attack_index * 0.19 for index in range(count)]
+    if pattern == "cross":
+        return [base + math.pi * index / 2 + attack_index * 0.12 for index in range(4)]
+    if pattern == "spiral":
+        return [math.tau * index / 8 + attack_index * 0.32 for index in range(8)]
+    if pattern == "sweep":
+        return [base - 0.9 + index * 0.36 + attack_index * 0.2 for index in range(6)]
+    if pattern == "double":
+        return [base + offset for offset in (-0.36, -0.18, 0.18, 0.36)]
+    count = 5 if phase == 3 else 3
+    spread = 0.46 if phase == 3 else 0.2
+    return [base + (index - (count - 1) / 2) * spread for index in range(count)]
 
 
 def update_team_lives(room: Room) -> None:
@@ -425,16 +482,26 @@ async def game_loop(room: Room) -> None:
                     player.face = 1 if player.dx > 0 else -1
             if player.shooting and now >= player.next_shot:
                 dx, dy = player.aim_x, player.aim_y
-                spread = (-0.16, 0.0, 0.16) if "storm" in player.synergies else (0.0,)
-                for angle in spread:
+                if player.weapon == "sunstaff":
+                    angles, speed, damage, cooldown = (-0.22, 0.0, 0.22), 390, player.damage * 0.68, player.fire_rate * 1.5
+                elif player.weapon == "moonchakram":
+                    angles, speed, damage, cooldown = (0.0,), 345, player.damage * 1.25, player.fire_rate * 1.9
+                else:
+                    angles, speed, damage, cooldown = (0.0,), 440, player.damage, player.fire_rate
+                if "storm" in player.synergies and player.weapon == "bow":
+                    angles = (-0.16, 0.0, 0.16)
+                for angle in angles:
                     cs, sn = math.cos(angle), math.sin(angle)
-                    room.shots.append({
+                    shot = {
                         "id": secrets.token_hex(4), "x": player.x, "y": player.y,
-                        "vx": (dx * cs - dy * sn) * 440,
-                        "vy": (dx * sn + dy * cs) * 440,
-                        "enemy": False, "life": 1.6, "damage": player.damage,
-                    })
-                player.next_shot = now + player.fire_rate
+                        "vx": (dx * cs - dy * sn) * speed,
+                        "vy": (dx * sn + dy * cs) * speed,
+                        "enemy": False, "life": 1.6, "damage": damage, "weapon": player.weapon,
+                    }
+                    if player.weapon == "moonchakram":
+                        shot.update({"owner_id": player.id, "age": 0.0, "return_after": 0.38, "returning": False, "return_speed": 390, "hit_ids": [], "max_hits": 3})
+                    room.shots.append(shot)
+                player.next_shot = now + cooldown
 
         if room.level % 5 == 0 and not room.boss_spawned:
             spawn_boss(room)
@@ -459,6 +526,13 @@ async def game_loop(room: Room) -> None:
             room.next_spawn = now + spawn_interval
 
         for enemy in list(room.enemies):
+            if enemy.get("boss"):
+                ratio = enemy["hp"] / max(1, enemy["maxHp"])
+                phase = 3 if ratio <= 0.3 else 2 if ratio <= 0.68 else 1
+                if phase != enemy.get("phase", 1):
+                    enemy["phase"] = phase
+                    enemy["windup_until"] = 0.0
+                    enemy["shot"] = now + 0.9
             target = min(active, key=lambda p: math.hypot(p.x - enemy["x"], p.y - enemy["y"]))
             distance = math.hypot(target.x - enemy["x"], target.y - enemy["y"]) or 1
             melee = enemy.get("type") == 0 and not enemy.get("boss")
@@ -488,18 +562,24 @@ async def game_loop(room: Room) -> None:
                 if winding and now >= winding:
                     vx, vy = enemy.get("aim_x", 0.0), enemy.get("aim_y", 0.0)
                     if enemy.get("boss"):
-                        for spread in (-0.16, 0, 0.16):
-                            cs, sn = math.cos(spread), math.sin(spread)
-                            room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": (vx * cs - vy * sn) * 175, "vy": (vx * sn + vy * cs) * 175, "enemy": True, "life": 3.0})
+                        for angle in boss_attack_angles(enemy):
+                            room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": math.cos(angle) * (175 + enemy["phase"] * 12), "vy": math.sin(angle) * (175 + enemy["phase"] * 12), "enemy": True, "life": 3.0, "boss_phase": enemy["phase"]})
+                        enemy["attack_index"] = enemy.get("attack_index", 0) + 1
                     else:
                         room.shots.append({"id": secrets.token_hex(4), "x": enemy["x"], "y": enemy["y"], "vx": vx * 160, "vy": vy * 160, "enemy": True, "life": 3.0})
                     enemy["windup_until"] = 0.0
                 elif not winding and now >= enemy["shot"] and distance < 390:
                     enemy["aim_x"] = (target.x - enemy["x"]) / distance
                     enemy["aim_y"] = (target.y - enemy["y"]) / distance
-                    enemy["windup_duration"] = 0.72 if enemy.get("boss") else 0.62
+                    if enemy.get("boss"):
+                        boss_type = max(0, min(5, int(enemy.get("boss_type", 0))))
+                        phase = max(1, min(3, int(enemy.get("phase", 1))))
+                        enemy["attack_pattern"] = BOSS_ATTACKS[boss_type][phase - 1]
+                        enemy["windup_duration"] = 0.88 if enemy["attack_pattern"] in {"radial", "spiral"} else 0.7 if phase == 2 else 0.62
+                    else:
+                        enemy["windup_duration"] = 0.62
                     enemy["windup_until"] = now + enemy["windup_duration"]
-                    enemy["shot"] = now + (1.7 if enemy.get("boss") else max(1.8, 3.1 - room.level * 0.08))
+                    enemy["shot"] = now + ((1.75 - enemy.get("phase", 1) * 0.2) if enemy.get("boss") else max(1.8, 3.1 - room.level * 0.08))
             distance = math.hypot(target.x - enemy["x"], target.y - enemy["y"]) or 1
             if distance < enemy["r"] + 12:
                 harm_player(room, target, now)
@@ -529,6 +609,19 @@ async def game_loop(room: Room) -> None:
                     harm_player(room, target, now)
 
         for shot in list(room.shots):
+            if not shot["enemy"] and shot.get("weapon") == "moonchakram":
+                shot["age"] = shot.get("age", 0.0) + dt
+                owner = room.players.get(shot.get("owner_id", ""))
+                if not shot.get("returning") and shot["age"] >= shot.get("return_after", 0.38):
+                    shot["returning"] = True
+                if shot.get("returning") and owner:
+                    dx, dy = owner.x - shot["x"], owner.y - shot["y"]
+                    distance = math.hypot(dx, dy) or 1
+                    if distance < 16:
+                        shot["life"] = 0
+                    else:
+                        shot["vx"] = dx / distance * shot.get("return_speed", 390)
+                        shot["vy"] = dy / distance * shot.get("return_speed", 390)
             shot["x"] += shot["vx"] * dt
             shot["y"] += shot["vy"] * dt
             shot["life"] -= dt
@@ -541,8 +634,14 @@ async def game_loop(room: Room) -> None:
             else:
                 for enemy in list(room.enemies):
                     if math.hypot(shot["x"] - enemy["x"], shot["y"] - enemy["y"]) < enemy["r"] + 4:
+                        if shot.get("weapon") == "moonchakram":
+                            hit_ids = shot.setdefault("hit_ids", [])
+                            if enemy["id"] in hit_ids:
+                                continue
+                            hit_ids.append(enemy["id"])
                         enemy["hp"] -= shot.get("damage", 1)
-                        shot["life"] = 0
+                        if shot.get("weapon") != "moonchakram" or len(shot.get("hit_ids", [])) >= shot.get("max_hits", 3):
+                            shot["life"] = 0
                         if enemy["hp"] <= 0:
                             room.enemies.remove(enemy)
                             room.kills += 1
@@ -556,7 +655,8 @@ async def game_loop(room: Room) -> None:
                                 room.upgrade_options = random.sample(list(RELICS), 3)
                                 room.pending_upgrades = {p.id for p in connected}
                                 room.status = "upgrade"
-                        break
+                        if shot.get("weapon") != "moonchakram" or shot["life"] <= 0:
+                            break
         room.shots = [s for s in room.shots if s["life"] > 0 and -40 < s["x"] < WORLD_W + 40 and 70 < s["y"] < WORLD_H + 40]
 
         for player in active:
@@ -582,9 +682,171 @@ async def game_loop(room: Room) -> None:
 app = FastAPI(title="Temple Echo Rooms", version="1.0")
 
 
+def verified_telegram_user(authorization: str | None) -> dict:
+    token = os.getenv("BOT_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=503, detail="Синхронизация профиля не настроена на сервере")
+    if not authorization or not authorization.startswith("tma "):
+        raise HTTPException(status_code=401, detail="Открой игру из Telegram, чтобы подтвердить профиль")
+
+    init_data = authorization[4:]
+    if len(init_data) > 8192:
+        raise HTTPException(status_code=401, detail="Данные Telegram слишком большие")
+    try:
+        pairs = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("duplicate fields")
+        fields = dict(pairs)
+        supplied_hash = fields.pop("hash")
+        auth_date = int(fields["auth_date"])
+        user = json.loads(fields["user"])
+        if not isinstance(user, dict) or int(user["id"]) <= 0:
+            raise ValueError("missing user")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="Не удалось проверить профиль Telegram") from None
+
+    now = int(time.time())
+    if auth_date > now + 60 or now - auth_date > 86_400:
+        raise HTTPException(status_code=401, detail="Сессия Telegram устарела. Перезапусти Mini App")
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
+    secret_key = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, supplied_hash):
+        raise HTTPException(status_code=401, detail="Подпись профиля Telegram недействительна")
+    return user
+
+
+def clean_json_value(value: object, depth: int = 0) -> object:
+    if depth > 8:
+        raise ValueError("checkpoint is too deeply nested")
+    if value is None or isinstance(value, (bool, str)):
+        return value[:512] if isinstance(value, str) else value
+    if isinstance(value, int):
+        return max(-2_000_000_000, min(2_000_000_000, value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("checkpoint contains a non-finite number")
+        return max(-2_000_000_000.0, min(2_000_000_000.0, value))
+    if isinstance(value, list):
+        if len(value) > 400:
+            raise ValueError("checkpoint list is too large")
+        return [clean_json_value(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        if len(value) > 100:
+            raise ValueError("checkpoint object is too large")
+        return {str(key)[:80]: clean_json_value(item, depth + 1) for key, item in value.items()}
+    raise ValueError("checkpoint contains an unsupported value")
+
+
+def normalize_account_profile(value: dict[str, object]) -> dict:
+    def bounded_int(key: str, low: int, high: int) -> int:
+        try:
+            return max(low, min(high, int(value.get(key, 0))))
+        except (TypeError, ValueError):
+            return 0
+
+    unlocks = value.get("unlocks", [])
+    unlocks = sorted({item for item in unlocks if isinstance(item, str) and item in PROFILE_UNLOCKS}) if isinstance(unlocks, list) else []
+    runs = bounded_int("runs", 0, 2_000_000_000)
+    wins = bounded_int("wins", 0, 2_000_000_000)
+    total_kills = bounded_int("totalKills", 0, 2_000_000_000)
+    best_wave = bounded_int("bestWave", 0, 20)
+    if runs:
+        unlocks.append("first-run")
+    if wins:
+        unlocks.append("keeper")
+    if best_wave >= 5:
+        unlocks.append("warden")
+    if total_kills >= 25:
+        unlocks.append("jade")
+
+    checkpoint = value.get("storyCheckpoint")
+    checkpoint_at = bounded_int("checkpointAt", 0, 10_000_000_000_000)
+    if checkpoint is not None:
+        try:
+            checkpoint = clean_json_value(checkpoint)
+            if not isinstance(checkpoint, dict) or checkpoint.get("version") != 1:
+                raise ValueError("invalid checkpoint")
+            checkpoint["wave"] = max(1, min(20, int(checkpoint.get("wave", 1))))
+            encoded = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            if len(encoded.encode("utf-8")) > 64_000:
+                raise ValueError("checkpoint is too large")
+        except (TypeError, ValueError, OverflowError):
+            checkpoint = None
+
+    hero_class = value.get("heroClass")
+    hero_skin = value.get("heroSkin")
+    weapon = value.get("weapon")
+    return {
+        "version": 1,
+        "runs": runs,
+        "wins": wins,
+        "totalKills": total_kills,
+        "bestScore": bounded_int("bestScore", 0, 2_000_000_000),
+        "bestWave": best_wave,
+        "storyBestLevel": bounded_int("storyBestLevel", 0, 20),
+        "unlocks": sorted(set(unlocks)),
+        "heroClass": hero_class if isinstance(hero_class, str) and hero_class in PROFILE_CLASSES else "scout",
+        "heroSkin": hero_skin if isinstance(hero_skin, str) and hero_skin in PROFILE_SKINS else "ember",
+        "weapon": weapon if isinstance(weapon, str) and weapon in WEAPONS else "bow",
+        "preferencesAt": bounded_int("preferencesAt", 0, 10_000_000_000_000),
+        "storyCheckpoint": checkpoint,
+        "checkpointAt": checkpoint_at,
+    }
+
+
+def merge_account_profiles(current: dict, incoming: dict) -> dict:
+    merged = dict(incoming)
+    for key in ("runs", "wins", "totalKills", "bestScore", "bestWave", "storyBestLevel"):
+        merged[key] = max(int(current.get(key, 0)), int(incoming.get(key, 0)))
+    merged["unlocks"] = sorted(set(current.get("unlocks", [])) | set(incoming.get("unlocks", [])))
+    if int(current.get("preferencesAt", 0)) > int(incoming.get("preferencesAt", 0)):
+        for key in ("heroClass", "heroSkin", "weapon", "preferencesAt"):
+            merged[key] = current.get(key)
+    if int(current.get("checkpointAt", 0)) > int(incoming.get("checkpointAt", 0)):
+        merged["storyCheckpoint"] = current.get("storyCheckpoint")
+        merged["checkpointAt"] = current.get("checkpointAt", 0)
+    return merged
+
+
 @app.get("/health")
 async def health_check() -> dict:
     return {"ok": True, "rooms": len(ROOMS)}
+
+
+@app.get("/api/profile")
+async def get_telegram_profile(authorization: str | None = Header(default=None)) -> dict:
+    user = verified_telegram_user(authorization)
+    telegram_id = str(int(user["id"]))
+    with sqlite3.connect(DB_PATH) as db:
+        row = db.execute("SELECT profile_json FROM telegram_profiles WHERE telegram_id=?", (telegram_id,)).fetchone()
+    profile = json.loads(row[0]) if row else None
+    return {
+        "verified": True,
+        "telegram": {"first_name": str(user.get("first_name", "Искатель"))[:64]},
+        "profile": profile,
+    }
+
+
+@app.put("/api/profile")
+async def save_telegram_profile(
+    request: ProfileSync,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user = verified_telegram_user(authorization)
+    telegram_id = str(int(user["id"]))
+    incoming = normalize_account_profile(request.profile)
+    with sqlite3.connect(DB_PATH) as db:
+        row = db.execute("SELECT profile_json FROM telegram_profiles WHERE telegram_id=?", (telegram_id,)).fetchone()
+        current = json.loads(row[0]) if row else normalize_account_profile({})
+        profile = merge_account_profiles(current, incoming)
+        db.execute(
+            """INSERT INTO telegram_profiles(telegram_id, profile_json, updated_at)
+               VALUES(?, ?, ?) ON CONFLICT(telegram_id) DO UPDATE SET
+               profile_json=excluded.profile_json, updated_at=excluded.updated_at""",
+            (telegram_id, json.dumps(profile, ensure_ascii=False, separators=(",", ":")), datetime.now(timezone.utc).isoformat()),
+        )
+    return {"verified": True, "profile": profile}
 
 
 @app.get("/api/lobbies")
@@ -599,7 +861,7 @@ async def list_lobbies() -> dict:
 @app.post("/api/lobbies")
 async def create_lobby(request: CreateRoom) -> dict:
     code = make_code()
-    host = new_player(request.name, index=0, hero_class=request.hero_class, skin=request.skin)
+    host = new_player(request.name, index=0, hero_class=request.hero_class, skin=request.skin, weapon=request.weapon)
     room = Room(code=code, capacity=request.capacity, host_id=host.id)
     room.players[host.id] = host
     ROOMS[code] = room
@@ -616,7 +878,7 @@ async def join_lobby(code: str, request: JoinRoom) -> dict:
         return {"room": lobby_payload(room), "player_id": player.id}
     if len(room.players) >= room.capacity:
         raise HTTPException(status_code=409, detail="Комната заполнена")
-    player = new_player(request.name, index=len(room.players), hero_class=request.hero_class, skin=request.skin)
+    player = new_player(request.name, index=len(room.players), hero_class=request.hero_class, skin=request.skin, weapon=request.weapon)
     room.players[player.id] = player
     await send_room(room)
     return {"room": lobby_payload(room), "player_id": player.id}
