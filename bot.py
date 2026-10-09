@@ -1,9 +1,10 @@
 """Telegram front door for the Temple Echo Mini App."""
 
 import asyncio
+from html import escape
 import logging
 import os
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -65,6 +66,7 @@ PAGES = {
         "Путь ведёт через затопленные залы, пепельное крыло, лунный сад и Зал корней. Победи четырёх стражей, собери печати и узнай, что скрывает Сердце храма.\n\n"
         "Каждый поход начинается с выбора героя и оружия. Между волнами находи реликвии и меняй тактику."
     ),
+    "daily": "",
 }
 
 BOT_DESCRIPTION = (
@@ -74,7 +76,7 @@ BOT_DESCRIPTION = (
 BOT_SHORT_DESCRIPTION = "Пиксельный survival‑экшен о пробуждённом храме."
 
 
-def game_url() -> str | None:
+def game_url(mode: str | None = None) -> str | None:
     """Return a Telegram-compatible HTTPS Mini App URL, if configured."""
     try:
         parsed = urlsplit(WEBAPP_URL)
@@ -82,6 +84,10 @@ def game_url() -> str | None:
         return None
     if parsed.scheme != "https" or not parsed.netloc:
         return None
+    if mode:
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "mode"]
+        query.append(("mode", mode))
+        return urlunsplit(parsed._replace(query=urlencode(query)))
     return WEBAPP_URL
 
 
@@ -90,7 +96,7 @@ def page_keyboard(page: str, url: str | None) -> InlineKeyboardMarkup:
     if url:
         rows.append([
             InlineKeyboardButton(
-                text="🎮 ОТКРЫТЬ ИГРУ",
+                text="🏆 ИГРАТЬ В ИСПЫТАНИЕ" if page == "daily" else "🎮 ОТКРЫТЬ ИГРУ",
                 web_app=WebAppInfo(url=url),
             )
         ])
@@ -101,7 +107,14 @@ def page_keyboard(page: str, url: str | None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⚔ Режимы", callback_data="page:modes"),
                 InlineKeyboardButton(text="🎮 Управление", callback_data="page:help"),
             ],
+            [InlineKeyboardButton(text="🏆 Испытание дня", callback_data="page:daily")],
             [InlineKeyboardButton(text="📜 История храма", callback_data="page:story")],
+        ])
+    elif page == "daily":
+        rows.append([InlineKeyboardButton(text="↻ Обновить таблицу", callback_data="page:daily")])
+        rows.append([
+            InlineKeyboardButton(text="⚔ Режимы", callback_data="page:modes"),
+            InlineKeyboardButton(text="← Главное меню", callback_data="page:home"),
         ])
     else:
         rows.append([
@@ -113,10 +126,39 @@ def page_keyboard(page: str, url: str | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def daily_page_text() -> str:
+    from room_server import daily_challenge, leaderboard
+
+    challenge = daily_challenge()
+    try:
+        scores = await asyncio.to_thread(leaderboard, challenge["day"])
+    except Exception:
+        logger.exception("Could not load the daily challenge leaderboard")
+        scores = []
+
+    ranking = [
+        f"<code>{index:02}</code> <b>{escape(str(entry['name']))}</b> · "
+        f"{int(entry['score']):,} очк. · зал {int(entry['level'])}"
+        for index, entry in enumerate(scores[:5], start=1)
+    ]
+    if not ranking:
+        ranking = ["<i>Пока нет рекордов. Займи первое место!</i>"]
+
+    return (
+        "<b>🏆 ИСПЫТАНИЕ ДНЯ</b>\n"
+        f"<code>{escape(challenge['day'])} · {escape(challenge['biome'])}</code>\n\n"
+        f"<b>{escape(challenge['title'])}</b>\n"
+        f"{escape(challenge['description'])}\n\n"
+        "Одинаковые условия для всех. Продержись дольше и попади в таблицу.\n\n"
+        "<b>ЛУЧШИЕ ИСКАТЕЛИ</b>\n" + "\n".join(ranking)
+    )
+
+
 async def send_page(message: Message, page: str) -> None:
+    text = await daily_page_text() if page == "daily" else PAGES[page]
     await message.answer(
-        PAGES[page],
-        reply_markup=page_keyboard(page, game_url()),
+        text,
+        reply_markup=page_keyboard(page, game_url("daily") if page == "daily" else game_url()),
         disable_web_page_preview=True,
     )
 
@@ -154,6 +196,11 @@ async def story(message: Message) -> None:
     await send_page(message, "story")
 
 
+@dp.message(Command("daily"))
+async def daily(message: Message) -> None:
+    await send_page(message, "daily")
+
+
 @dp.callback_query(F.data.startswith("page:"))
 async def navigate(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -164,11 +211,12 @@ async def navigate(callback: CallbackQuery) -> None:
     page = (callback.data or "").partition(":")[2]
     if page not in PAGES:
         page = "home"
+    text = await daily_page_text() if page == "daily" else PAGES[page]
 
     try:
         await message.edit_text(
-            PAGES[page],
-            reply_markup=page_keyboard(page, game_url()),
+            text,
+            reply_markup=page_keyboard(page, game_url("daily") if page == "daily" else game_url()),
             disable_web_page_preview=True,
         )
     except TelegramBadRequest as error:
@@ -198,6 +246,7 @@ async def configure_bot(bot: Bot) -> None:
         BotCommand(command="modes", description="Посмотреть режимы"),
         BotCommand(command="help", description="Управление и помощь"),
         BotCommand(command="story", description="История храма"),
+        BotCommand(command="daily", description="Испытание дня и рекорды"),
     ])
     await bot.set_chat_menu_button(
         menu_button=MenuButtonWebApp(
